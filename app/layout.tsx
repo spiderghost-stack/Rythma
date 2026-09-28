@@ -24,8 +24,8 @@ export default function RootLayout({ children }: LayoutProps<'/'>) {
   return (
     <html lang="fr" className={`${inter.variable} dark h-full`}>
       <body className="min-h-full bg-[#090d1a] text-slate-200 antialiased">
-        <StoreProvider>
-          <AuthWrapper>
+        <AuthWrapper>
+          <StoreProvider>
             <TooltipProvider delay={300}>
               <div className="flex h-screen w-full overflow-hidden flex-col md:flex-row">
                 <Sidebar />
@@ -36,8 +36,8 @@ export default function RootLayout({ children }: LayoutProps<'/'>) {
                 <BottomNav />
               </div>
             </TooltipProvider>
-          </AuthWrapper>
-        </StoreProvider>
+          </StoreProvider>
+        </AuthWrapper>
         <Toaster theme="dark" />
       </body>
     </html>
