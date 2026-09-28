@@ -12,7 +12,7 @@ import {
 } from '@/components/ui/alert-dialog'
 
 export default function ParametresPage() {
-  const { tasks, records, notes, reminders, hydrate } = usePlanningStore()
+  const { userId, tasks, records, notes, reminders, hydrate } = usePlanningStore()
 
   const [confirmStats, setConfirmStats] = useState(false)
   const [confirmFactory, setConfirmFactory] = useState(false)
@@ -33,7 +33,7 @@ export default function ParametresPage() {
 
   function executeResetStats() {
     saveRecords([])
-    hydrate()
+    if (userId) hydrate(userId)
     toast.success('Statistiques réinitialisées.')
   }
 
@@ -42,7 +42,7 @@ export default function ParametresPage() {
     saveRecords([])
     saveNotes([])
     saveReminders([])
-    hydrate()
+    if (userId) hydrate(userId)
     toast.success('Application réinitialisée à son état initial.')
   }
 

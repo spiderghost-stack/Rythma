@@ -9,26 +9,25 @@ import {
   getReminders, saveReminders,
   getPreferences, savePreferences,
   initStorage,
+  syncFromSupabase
 } from '@/lib/storage'
 import { getWeekKey, nextWeekKey, prevWeekKey } from '@/lib/utils/date'
-import { calculateWeekStats, getTasksForWeek, getRecord } from '@/lib/calculations/stats'
+import { calculateWeekStats } from '@/lib/calculations/stats'
 import { WeekStats } from '@/types/tracking'
 import { CATEGORY_COLORS } from '@/lib/utils/categories'
+import { supabase } from '@/lib/supabase'
 
 interface PlanningStore {
-  // State
+  userId: string | null
   tasks: ScheduleTask[]
   records: TaskRecord[]
   notes: Note[]
   reminders: Reminder[]
   preferences: UserPreferences
   hydrated: boolean
-
-  // Computed
   currentWeekStats: WeekStats | null
 
-  // Actions
-  hydrate: () => void
+  hydrate: (userId: string) => Promise<void>
   setTaskStatus: (taskId: string, status: TaskStatus, note?: string) => void
   addTask: (task: Omit<ScheduleTask, 'id'>) => void
   updateTask: (id: string, updates: Partial<ScheduleTask>) => void
@@ -42,144 +41,189 @@ interface PlanningStore {
   refreshStats: () => void
 }
 
-let taskCounter = 1000
-
 export const usePlanningStore = create<PlanningStore>((set, get) => ({
+  userId: null,
   tasks: [],
   records: [],
   notes: [],
   reminders: [],
-  preferences: {
-    currentWeekKey: getWeekKey(),
-    startHour: 7,
-    endHour: 24,
-    firstDayOfWeek: 1,
-  },
+  preferences: { currentWeekKey: getWeekKey(), startHour: 7, endHour: 24, firstDayOfWeek: 1 },
   hydrated: false,
   currentWeekStats: null,
 
-  hydrate: () => {
+  hydrate: async (userId) => {
     initStorage()
+    try {
+      await syncFromSupabase(userId)
+    } catch (e) {
+      console.error('Failed to sync from Supabase', e)
+    }
+    
     const tasks = getTasks()
     const records = getRecords()
     const notes = getNotes()
     const reminders = getReminders()
     const preferences = getPreferences()
-    const weekKey = preferences.currentWeekKey
-    const currentWeekStats = calculateWeekStats(tasks, records, weekKey)
-    set({ tasks, records, notes, reminders, preferences, hydrated: true, currentWeekStats })
+    const currentWeekStats = calculateWeekStats(tasks, records, preferences.currentWeekKey)
+    
+    set({ userId, tasks, records, notes, reminders, preferences, hydrated: true, currentWeekStats })
   },
 
   refreshStats: () => {
     const { tasks, records, preferences } = get()
-    const currentWeekStats = calculateWeekStats(tasks, records, preferences.currentWeekKey)
-    set({ currentWeekStats })
+    set({ currentWeekStats: calculateWeekStats(tasks, records, preferences.currentWeekKey) })
   },
 
-  setTaskStatus: (taskId, status, note) => {
-    const { records, preferences } = get()
+  setTaskStatus: async (taskId, status, note) => {
+    const { records, preferences, userId, tasks } = get()
     const weekKey = preferences.currentWeekKey
     const existing = records.findIndex(r => r.taskId === taskId && r.weekKey === weekKey)
-    const record: TaskRecord = {
-      taskId,
-      weekKey,
-      status,
-      note,
-      validatedAt: new Date().toISOString(),
-    }
-    const newRecords = existing >= 0
-      ? records.map((r, i) => (i === existing ? record : r))
-      : [...records, record]
+    const record: TaskRecord = { taskId, weekKey, status, note, validatedAt: new Date().toISOString() }
+    
+    const newRecords = existing >= 0 ? records.map((r, i) => i === existing ? record : r) : [...records, record]
     saveRecords(newRecords)
-    const currentWeekStats = calculateWeekStats(get().tasks, newRecords, weekKey)
-    set({ records: newRecords, currentWeekStats })
+    set({ records: newRecords, currentWeekStats: calculateWeekStats(tasks, newRecords, weekKey) })
+
+    if (userId) {
+      await supabase.from('records').upsert({
+        task_id: taskId, user_id: userId, week_key: weekKey, status, note, validated_at: record.validatedAt
+      })
+    }
   },
 
-  addTask: (taskData) => {
+  addTask: async (taskData) => {
+    const { userId, tasks } = get()
     const task: ScheduleTask = {
       ...taskData,
-      id: `task-custom-${++taskCounter}`,
+      id: crypto.randomUUID(),
       color: taskData.color || CATEGORY_COLORS[taskData.category],
     }
-    const newTasks = [...get().tasks, task]
+    const newTasks = [...tasks, task]
     saveTasks(newTasks)
     set({ tasks: newTasks })
     get().refreshStats()
+
+    if (userId) {
+      await supabase.from('tasks').insert({
+        id: task.id, user_id: userId, title: task.title, subtitle: task.subtitle,
+        category: task.category, day: task.day, start_time: task.startTime, end_time: task.endTime,
+        description: task.description, color: task.color, week_key: task.weekKey,
+        recurring_type: task.recurring?.type, recurring_days: task.recurring?.days
+      })
+    }
   },
 
-  updateTask: (id, updates) => {
-    const newTasks = get().tasks.map(t => t.id === id ? { ...t, ...updates } : t)
+  updateTask: async (id, updates) => {
+    const { userId, tasks } = get()
+    const newTasks = tasks.map(t => t.id === id ? { ...t, ...updates } : t)
     saveTasks(newTasks)
     set({ tasks: newTasks })
     get().refreshStats()
+
+    if (userId) {
+      const task = newTasks.find(t => t.id === id)
+      if (task) {
+        await supabase.from('tasks').update({
+          title: task.title, subtitle: task.subtitle, category: task.category, day: task.day,
+          start_time: task.startTime, end_time: task.endTime, description: task.description,
+          color: task.color, week_key: task.weekKey, recurring_type: task.recurring?.type, recurring_days: task.recurring?.days
+        }).eq('id', id)
+      }
+    }
   },
 
-  deleteTask: (id) => {
-    const newTasks = get().tasks.filter(t => t.id !== id)
-    const newRecords = get().records.filter(r => r.taskId !== id)
+  deleteTask: async (id) => {
+    const { userId, tasks, records } = get()
+    const newTasks = tasks.filter(t => t.id !== id)
+    const newRecords = records.filter(r => r.taskId !== id)
     saveTasks(newTasks)
     saveRecords(newRecords)
     set({ tasks: newTasks, records: newRecords })
     get().refreshStats()
+
+    if (userId) {
+      await supabase.from('tasks').delete().eq('id', id)
+    }
   },
 
-  navigateWeek: (direction) => {
-    const { preferences } = get()
-    let newWeekKey: string
-    if (direction === 'today') newWeekKey = getWeekKey()
-    else if (direction === 'next') newWeekKey = nextWeekKey(preferences.currentWeekKey)
-    else newWeekKey = prevWeekKey(preferences.currentWeekKey)
-
+  navigateWeek: async (direction) => {
+    const { preferences, userId, tasks, records } = get()
+    let newWeekKey = direction === 'today' ? getWeekKey() : direction === 'next' ? nextWeekKey(preferences.currentWeekKey) : prevWeekKey(preferences.currentWeekKey)
+    
     const newPrefs = { ...preferences, currentWeekKey: newWeekKey }
     savePreferences(newPrefs)
-    const currentWeekStats = calculateWeekStats(get().tasks, get().records, newWeekKey)
-    set({ preferences: newPrefs, currentWeekStats })
-  },
+    set({ preferences: newPrefs, currentWeekStats: calculateWeekStats(tasks, records, newWeekKey) })
 
-  addNote: (title, content) => {
-    const newNote: Note = {
-      id: `note-${Date.now()}`,
-      title,
-      content,
-      updatedAt: new Date().toISOString(),
+    if (userId) {
+      await supabase.from('preferences').upsert({
+        user_id: userId, current_week_key: newWeekKey, start_hour: newPrefs.startHour,
+        end_hour: newPrefs.endHour, first_day_of_week: newPrefs.firstDayOfWeek
+      })
     }
-    const newNotes = [newNote, ...get().notes]
-    saveNotes(newNotes)
-    set({ notes: newNotes })
   },
 
-  updateNote: (id, title, content) => {
-    const newNotes = get().notes.map(n =>
-      n.id === id ? { ...n, title, content, updatedAt: new Date().toISOString() } : n
-    )
+  addNote: async (title, content) => {
+    const { userId, notes } = get()
+    const newNote: Note = { id: crypto.randomUUID(), title, content, updatedAt: new Date().toISOString() }
+    const newNotes = [newNote, ...notes]
     saveNotes(newNotes)
     set({ notes: newNotes })
+
+    if (userId) {
+      await supabase.from('notes').insert({
+        id: newNote.id, user_id: userId, title, content, updated_at: newNote.updatedAt
+      })
+    }
   },
 
-  deleteNote: (id) => {
-    const newNotes = get().notes.filter(n => n.id !== id)
+  updateNote: async (id, title, content) => {
+    const { userId, notes } = get()
+    const updatedAt = new Date().toISOString()
+    const newNotes = notes.map(n => n.id === id ? { ...n, title, content, updatedAt } : n)
     saveNotes(newNotes)
     set({ notes: newNotes })
+
+    if (userId) {
+      await supabase.from('notes').update({ title, content, updated_at: updatedAt }).eq('id', id)
+    }
   },
 
-  toggleReminder: (id) => {
-    const newReminders = get().reminders.map(r =>
-      r.id === id ? { ...r, done: !r.done } : r
-    )
+  deleteNote: async (id) => {
+    const { userId, notes } = get()
+    const newNotes = notes.filter(n => n.id !== id)
+    saveNotes(newNotes)
+    set({ notes: newNotes })
+
+    if (userId) {
+      await supabase.from('notes').delete().eq('id', id)
+    }
+  },
+
+  toggleReminder: async (id) => {
+    const { userId, reminders } = get()
+    const newReminders = reminders.map(r => r.id === id ? { ...r, done: !r.done } : r)
     saveReminders(newReminders)
     set({ reminders: newReminders })
+
+    if (userId) {
+      const rem = newReminders.find(r => r.id === id)
+      if (rem) {
+        await supabase.from('reminders').update({ done: rem.done }).eq('id', id)
+      }
+    }
   },
 
-  addReminder: (text) => {
-    const today = new Date().toISOString().split('T')[0]
-    const reminder: Reminder = {
-      id: `rem-${Date.now()}`,
-      text,
-      done: false,
-      date: today,
-    }
-    const newReminders = [...get().reminders, reminder]
+  addReminder: async (text) => {
+    const { userId, reminders } = get()
+    const reminder: Reminder = { id: crypto.randomUUID(), text, done: false, date: new Date().toISOString().split('T')[0] }
+    const newReminders = [...reminders, reminder]
     saveReminders(newReminders)
     set({ reminders: newReminders })
+
+    if (userId) {
+      await supabase.from('reminders').insert({
+        id: reminder.id, user_id: userId, text, done: false, date: reminder.date
+      })
+    }
   },
 }))

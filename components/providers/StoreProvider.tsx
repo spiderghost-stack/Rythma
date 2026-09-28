@@ -4,12 +4,11 @@ import { useEffect } from 'react'
 import { usePlanningStore } from '@/lib/store/planningStore'
 
 export function StoreProvider({ children }: { children: React.ReactNode }) {
-  const hydrate = usePlanningStore(s => s.hydrate)
   const hydrated = usePlanningStore(s => s.hydrated)
 
   useEffect(() => {
-    hydrate()
-  }, [hydrate])
+    // hydrate is now handled by AuthWrapper
+  }, [])
 
   if (!hydrated) {
     return (

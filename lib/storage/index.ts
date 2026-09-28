@@ -1,6 +1,7 @@
 import { ScheduleTask, TaskRecord, Reminder, UserPreferences, Note } from '@/types/planning'
 import { INITIAL_TASKS } from '@/data/initialPlanning'
 import { getWeekKey } from '@/lib/utils/date'
+import { supabase } from '@/lib/supabase'
 
 const KEYS = {
   TASKS:       'monplanning:tasks',
@@ -10,8 +11,6 @@ const KEYS = {
   PREFERENCES: 'monplanning:preferences',
   VERSION:     'monplanning:version',
 } as const
-
-const SCHEMA_VERSION = '1'
 
 function isBrowser(): boolean {
   return typeof window !== 'undefined'
@@ -36,78 +35,108 @@ function write<T>(key: string, value: T): void {
   }
 }
 
-// ─── Tasks ─────────────────────────────────────────────────────────────────
+// ─── Supabase Sync ────────────────────────────────────────────────────────
+// This reads from Supabase and overwrites local storage.
+export async function syncFromSupabase(userId: string) {
+  const [
+    { data: prefsData },
+    { data: tasksData },
+    { data: recordsData },
+    { data: notesData },
+    { data: remsData }
+  ] = await Promise.all([
+    supabase.from('preferences').select('*').eq('user_id', userId).single(),
+    supabase.from('tasks').select('*').eq('user_id', userId),
+    supabase.from('records').select('*').eq('user_id', userId),
+    supabase.from('notes').select('*').eq('user_id', userId).order('updated_at', { ascending: false }),
+    supabase.from('reminders').select('*').eq('user_id', userId)
+  ])
 
-export function getTasks(): ScheduleTask[] {
-  const stored = read<ScheduleTask[] | null>(KEYS.TASKS, null)
-  if (!stored) {
-    // First load: seed with initial planning
-    write(KEYS.TASKS, INITIAL_TASKS)
-    return INITIAL_TASKS
+  if (prefsData) {
+    savePreferences({
+      currentWeekKey: prefsData.current_week_key,
+      startHour: prefsData.start_hour,
+      endHour: prefsData.end_hour,
+      firstDayOfWeek: prefsData.first_day_of_week as 0 | 1
+    })
   }
-  return stored
+
+  if (tasksData && tasksData.length > 0) {
+    saveTasks(tasksData.map(t => ({
+      id: t.id,
+      title: t.title,
+      subtitle: t.subtitle,
+      category: t.category as any,
+      day: t.day as any,
+      startTime: t.start_time,
+      endTime: t.end_time,
+      description: t.description,
+      color: t.color,
+      weekKey: t.week_key,
+      recurring: t.recurring_type ? { type: t.recurring_type, days: t.recurring_days } : undefined
+    })))
+  }
+
+  if (recordsData) {
+    saveRecords(recordsData.map(r => ({
+      taskId: r.task_id,
+      weekKey: r.week_key,
+      status: r.status as any,
+      note: r.note,
+      validatedAt: r.validated_at
+    })))
+  }
+
+  if (notesData) {
+    saveNotes(notesData.map(n => ({
+      id: n.id,
+      title: n.title,
+      content: n.content,
+      updatedAt: n.updated_at
+    })))
+  }
+
+  if (remsData) {
+    saveReminders(remsData.map(r => ({
+      id: r.id,
+      text: r.text,
+      done: r.done,
+      date: r.date
+    })))
+  }
 }
 
+// ─── Local Getters & Setters ──────────────────────────────────────────────
+
+export function getTasks(): ScheduleTask[] {
+  return read(KEYS.TASKS, INITIAL_TASKS)
+}
 export function saveTasks(tasks: ScheduleTask[]): void {
   write(KEYS.TASKS, tasks)
 }
 
-// ─── Records ───────────────────────────────────────────────────────────────
-
 export function getRecords(): TaskRecord[] {
   return read<TaskRecord[]>(KEYS.RECORDS, [])
 }
-
 export function saveRecords(records: TaskRecord[]): void {
   write(KEYS.RECORDS, records)
 }
 
-// ─── Notes ─────────────────────────────────────────────────────────────────
-
 export function getNotes(): Note[] {
   const raw = read<unknown>(KEYS.NOTES, [])
-  if (typeof raw === 'string') {
-    const migrated: Note[] = [{
-      id: Date.now().toString(),
-      title: 'Note rapide',
-      content: raw,
-      updatedAt: new Date().toISOString()
-    }]
-    write(KEYS.NOTES, migrated)
-    return migrated
-  }
+  if (typeof raw === 'string') return []
   return Array.isArray(raw) ? raw : []
 }
-
 export function saveNotes(notes: Note[]): void {
   write(KEYS.NOTES, notes)
 }
 
-// ─── Reminders ─────────────────────────────────────────────────────────────
-
 export function getReminders(): Reminder[] {
-  const today = new Date().toISOString().split('T')[0]
-  const stored = read<Reminder[]>(KEYS.REMINDERS, [])
-  // Seed default reminders if none for today
-  if (!stored.some(r => r.date === today)) {
-    const defaults: Reminder[] = [
-      { id: `rem-${today}-1`, text: "Ne pas oublier l'espagnol 10–15 min", done: false, date: today },
-      { id: `rem-${today}-2`, text: 'Hydratation', done: false, date: today },
-      { id: `rem-${today}-3`, text: 'Dormir avant 00h00', done: false, date: today },
-      { id: `rem-${today}-4`, text: 'Rester focus sur la PF', done: false, date: today },
-    ]
-    const merged = [...stored, ...defaults]
-    write(KEYS.REMINDERS, merged)
-    return merged
-  }
-  return stored
+  return read<Reminder[]>(KEYS.REMINDERS, [])
 }
-
 export function saveReminders(reminders: Reminder[]): void {
   write(KEYS.REMINDERS, reminders)
 }
-
-// ─── Preferences ───────────────────────────────────────────────────────────
 
 export function getPreferences(): UserPreferences {
   return read<UserPreferences>(KEYS.PREFERENCES, {
@@ -117,18 +146,8 @@ export function getPreferences(): UserPreferences {
     firstDayOfWeek: 1,
   })
 }
-
 export function savePreferences(prefs: UserPreferences): void {
   write(KEYS.PREFERENCES, prefs)
 }
 
-// ─── Init / Migration ──────────────────────────────────────────────────────
-
-export function initStorage(): void {
-  if (!isBrowser()) return
-  const version = read<string>(KEYS.VERSION, '')
-  if (version !== SCHEMA_VERSION) {
-    // Future: migrate here
-    write(KEYS.VERSION, SCHEMA_VERSION)
-  }
-}
+export function initStorage(): void {}
