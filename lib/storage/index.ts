@@ -38,6 +38,7 @@ function write<T>(key: string, value: T): void {
 // ─── Supabase Sync ────────────────────────────────────────────────────────
 // This reads from Supabase and overwrites local storage.
 export async function syncFromSupabase(userId: string) {
+  // Fetch all data in parallel
   const [
     { data: prefsData },
     { data: tasksData },
@@ -52,16 +53,26 @@ export async function syncFromSupabase(userId: string) {
     supabase.from('reminders').select('*').eq('user_id', userId)
   ])
 
-  if (prefsData) {
-    savePreferences({
-      currentWeekKey: prefsData.current_week_key,
-      startHour: prefsData.start_hour,
-      endHour: prefsData.end_hour,
-      firstDayOfWeek: prefsData.first_day_of_week as 0 | 1
-    })
-  }
-
-  if (tasksData && tasksData.length > 0) {
+  // If no tasks in Supabase yet, push the initial tasks (first-time login)
+  if (!tasksData || tasksData.length === 0) {
+    const rows = INITIAL_TASKS.map(t => ({
+      id: t.id,
+      user_id: userId,
+      title: t.title,
+      subtitle: t.subtitle ?? null,
+      category: t.category,
+      day: t.day,
+      start_time: t.startTime,
+      end_time: t.endTime,
+      description: t.description ?? null,
+      color: t.color,
+      week_key: t.weekKey ?? null,
+      recurring_type: t.recurring?.type ?? null,
+      recurring_days: t.recurring?.days ?? null,
+    }))
+    await supabase.from('tasks').insert(rows)
+    saveTasks(INITIAL_TASKS)
+  } else {
     saveTasks(tasksData.map(t => ({
       id: t.id,
       title: t.title,
@@ -77,7 +88,16 @@ export async function syncFromSupabase(userId: string) {
     })))
   }
 
-  if (recordsData) {
+  if (prefsData) {
+    savePreferences({
+      currentWeekKey: prefsData.current_week_key,
+      startHour: prefsData.start_hour,
+      endHour: prefsData.end_hour,
+      firstDayOfWeek: prefsData.first_day_of_week as 0 | 1
+    })
+  }
+
+  if (recordsData && recordsData.length > 0) {
     saveRecords(recordsData.map(r => ({
       taskId: r.task_id,
       weekKey: r.week_key,
@@ -87,7 +107,7 @@ export async function syncFromSupabase(userId: string) {
     })))
   }
 
-  if (notesData) {
+  if (notesData && notesData.length > 0) {
     saveNotes(notesData.map(n => ({
       id: n.id,
       title: n.title,
@@ -96,7 +116,7 @@ export async function syncFromSupabase(userId: string) {
     })))
   }
 
-  if (remsData) {
+  if (remsData && remsData.length > 0) {
     saveReminders(remsData.map(r => ({
       id: r.id,
       text: r.text,
